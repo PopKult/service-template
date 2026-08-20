@@ -7,24 +7,30 @@ README covers what's specific to using the template itself.
 
 This is a **bare skeleton**: real, working infrastructure (config
 loading, dependency wiring, health checks, graceful shutdown, the
-transactional outbox, Dockerfile, k8s manifests, CI) with **zero business
-logic**. It compiles, lints, and passes its tests as-is — there's no
-invented example domain to strip out.
+transactional outbox, Dockerfile, CI) with **zero business logic**. It
+compiles, lints, and passes its tests as-is — there's no invented example
+domain to strip out.
+
+This repo owns the service's *code and image build*. Two sibling repos
+own the rest of the deployment story:
+
+| Repo | Owns |
+|---|---|
+| [`github.com/PopKult/prod-setup`](https://github.com/PopKult/prod-setup) | k8s manifests, one directory per service |
+| [`github.com/PopKult/local-setup`](https://github.com/PopKult/local-setup) | local dev docker-compose stack, one block per service |
 
 ## Turning this into a new service
 
 Because internal package names are already generic (`registry`,
 `config`, `postgres`, `grpcserver`, ...) and the service's own name is
 read from the `SERVICE_NAME` env var at runtime rather than hardcoded in
-Go source, renaming is a small, mechanical surface — a literal string
-replace of `service-template` → `<new-service>` (kebab-case) in exactly
-these places:
+Go source, renaming this repo is a small, mechanical surface — a literal
+string replace of `service-template` → `<new-service>` (kebab-case) in
+exactly these places:
 
 1. `go.mod` — module path
-2. `deployments/docker-compose.yml` — service names, image names, DB/user names
-3. `deployments/k8s/*.yaml` — resource names, labels, `ConfigMap`/`Secret` refs
-4. `.github/workflows/ci.yml` — image tag
-5. This README's title
+2. `.github/workflows/ci.yml` — image tag
+3. This README's title
 
 No Go template syntax, no package renames. Steps for a Claude skill (or a
 human) generating `order-service` from this template:
@@ -33,12 +39,16 @@ human) generating `order-service` from this template:
 cp -r service-template order-service
 cd order-service
 grep -rl 'service-template' . --exclude-dir=.git | xargs sed -i '' 's/service-template/order-service/g'
-sed -i '' 's#module github.com/PopKult/order-service#module github.com/PopKult/order-service#' go.mod  # already correct after the sed above
 go mod tidy
 git init && git add -A && git commit -m "Initial order-service from service-template"
 ```
 
-Then, per `docs/microservice-standards.md`:
+Then, in the sibling repos:
+
+- **`prod-setup`**: `cp -r services/service-template services/order-service` and rename throughout — see that repo's README.
+- **`local-setup`**: add `order-service-migrate` / `order-service` / `order-service-outbox-relay` blocks to `docker-compose.yml`, copying the `service-template` blocks — see that repo's README.
+
+And, per `docs/microservice-standards.md`:
 
 - **Stop and ask** which GraphQL gateway topology applies (§2.3) before
   touching `internal/entrypoint/graphql/` — this template deliberately
@@ -62,9 +72,9 @@ Then, per `docs/microservice-standards.md`:
 | Prometheus `/metrics` endpoint | `internal/entrypoint/metricsserver` |
 | Outbox table migration | `migrations/0001_create_outbox.{up,down}.sql` |
 | Multi-stage Alpine Dockerfile, non-root | `deployments/docker/Dockerfile` |
-| Local dev stack (Postgres, Kafka, OTel Collector, both binaries) | `deployments/docker-compose.yml` |
-| k8s Deployment/Service/ConfigMap + migration Job | `deployments/k8s/` |
 | CI: lint, test (incl. integration), govulncheck, Trivy, gitleaks, build | `.github/workflows/ci.yml` |
+| k8s manifests | [`prod-setup/services/service-template/`](https://github.com/PopKult/prod-setup) |
+| Local dev compose stack | [`local-setup/docker-compose.yml`](https://github.com/PopKult/local-setup) |
 
 Library choices the standards doc doesn't pin (its Quick Reference table
 has no entry for these) — picked here, swap freely if the team prefers
@@ -75,11 +85,17 @@ otherwise:
 
 ## Local development
 
+Requires `github.com/PopKult/local-setup` checked out as a sibling
+directory (`../local-setup` relative to this repo) — see that repo's
+README, in particular the `~/.netrc` setup needed for the private-module
+build.
+
 ```
-cd deployments && docker compose up --build
+make compose-up    # everything, via ../local-setup/docker-compose.yml
+make compose-down
 ```
 
-Or run outside Docker against `docker compose up postgres kafka otel-collector`:
+Or run outside Docker against `cd ../local-setup && docker compose up postgres kafka otel-collector`:
 
 ```
 cp .env.example .env

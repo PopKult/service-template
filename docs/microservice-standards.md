@@ -26,15 +26,22 @@ scaffolding or reviewing a service**, not just read by a human, so:
 - When this doc and a service's existing code disagree, this doc wins —
   the code is the thing that's wrong.
 
-**Repo model:** one GitHub repo per service, `github.com/PopKult/<service>`.
-Two additional repos are shared infrastructure for every service:
+**Repo model:** one GitHub repo per service, `github.com/PopKult/<service>`,
+holding that service's code and container image build only — no k8s
+manifests, no docker-compose. Four additional repos are shared
+infrastructure for every service:
 
 | Repo | Contents |
 |---|---|
 | `github.com/PopKult/schema` | all `.proto` and GraphQL schema files, buf-managed |
 | `github.com/PopKult/go-common` | shared Go library: logging, config, middleware |
+| `github.com/PopKult/prod-setup` | k8s manifests for every service, one directory per service |
+| `github.com/PopKult/local-setup` | local dev docker-compose stack, shared infra + one block per service |
 
-Both are private and versioned with semver tags; see [§9](#9-shared-code--schema-repo).
+All four are private; `schema` and `go-common` are versioned with semver
+tags (see [§9](#9-shared-code--infra-repos)), `prod-setup` and
+`local-setup` are plain manifests/compose tracked at `main` (nothing
+`go get`s them, so no tagging discipline is needed).
 
 ---
 
@@ -58,8 +65,8 @@ Both are private and versioned with semver tags; see [§9](#9-shared-code--schem
 | Log shipping | stdout → Filebeat/Fluent Bit DaemonSet → Elasticsearch |
 | Config loading | `github.com/caarlos0/env/v9` into a typed `Config` struct, fail-fast at startup |
 | Secrets (prod) | k8s `Secret` sealed with Bitnami Sealed Secrets, committed encrypted |
-| Prod deploy target | Kubernetes |
-| Local dev | docker-compose |
+| Prod deploy target | Kubernetes, manifests in `github.com/PopKult/prod-setup` |
+| Local dev | docker-compose, stack in `github.com/PopKult/local-setup` |
 | Container base image | multi-stage build → `alpine`, non-root user |
 | DB migrations | `golang-migrate`, run as a k8s Job before rollout, never by the app itself |
 | Service-to-service auth | mTLS via service mesh (Istio/Linkerd), no app code |
@@ -102,22 +109,28 @@ repository *interfaces* — and MUST NOT point outward.
 │   ├── entrypoint/
 │   │   ├── grpcserver/
 │   │   ├── kafkaconsumer/
-│   │   └── graphql/
+│   │   ├── graphql/
+│   │   └── metricsserver/     # Prometheus /metrics HTTP endpoint
 │   ├── audit/                 # OPTIONAL — only if the service has admin actions, see §1.4
 │   ├── registry/               # wires repositories → use cases → entrypoints, see §1.5
 │   └── config/                 # typed Config struct + loader, see §6
 ├── migrations/                 # golang-migrate SQL files
 ├── deployments/
-│   ├── docker/Dockerfile
-│   ├── k8s/                    # manifests / helm chart
-│   └── docker-compose.yml      # local dev stack
+│   └── docker/Dockerfile
 ├── go.mod
 └── README.md
 ```
 
+A service repo holds its own code and container image build only. It
+MUST NOT contain k8s manifests or a docker-compose file — those live in
+`github.com/PopKult/prod-setup` and `github.com/PopKult/local-setup`
+respectively (see [§7](#7-deployment--runtime)), one directory/block per
+service in each, so cluster and local-stack topology changes don't
+require a code review in the service repo.
+
 Generated gRPC/GraphQL code MUST NOT be vendored locally — it's imported as
 a versioned Go module published from `github.com/PopKult/schema` (see
-[§9](#9-shared-code--schema-repo)). A service repo MUST NOT contain a local
+[§9](#9-shared-code--infra-repos)). A service repo MUST NOT contain a local
 `api/` directory of `.proto` files.
 
 ### 1.1 Use cases
@@ -434,23 +447,29 @@ query UI. No service holds an Elastic client or credential.
 - The app's config-loading code MUST be identical in every environment —
   it only ever reads env vars. What differs is how those env vars get
   set:
-  - **Local (docker-compose):** plain `environment:`/`env_file` blocks
-    with dummy dev credentials.
-  - **Prod (k8s):** non-sensitive config via `ConfigMap`, secrets via
-    `Secret` objects, both injected as env vars into the pod.
+  - **Local (docker-compose, in `github.com/PopKult/local-setup`):** plain
+    `environment:` blocks with dummy dev credentials.
+  - **Prod (k8s, in `github.com/PopKult/prod-setup`):** non-sensitive
+    config via `ConfigMap`, secrets via `Secret` objects, both injected
+    as env vars into the pod.
 - **Secrets in prod** MUST be managed as k8s `Secret` manifests sealed
   with [Bitnami Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets)
-  so the encrypted form can be committed to git and only the cluster can
-  decrypt it. Plaintext secrets MUST NOT land in git under any
-  circumstance. (Migrating to an external secrets manager — Vault or a
-  cloud secrets service — is a deferred decision, see below, for if
-  rotation/audit needs outgrow Sealed Secrets.)
+  so the encrypted form can be committed to git (in `prod-setup`) and
+  only the cluster can decrypt it. Plaintext secrets MUST NOT land in git
+  under any circumstance. (Migrating to an external secrets manager —
+  Vault or a cloud secrets service — is a deferred decision, see below,
+  for if rotation/audit needs outgrow Sealed Secrets.)
 
 ---
 
 ## 7. Deployment & runtime
 
-- **Prod:** Kubernetes. **Local:** docker-compose.
+- **Prod:** Kubernetes, manifests in `github.com/PopKult/prod-setup`
+  (`services/<service>/`, one directory per service — see that repo's
+  README). **Local:** docker-compose, stack in
+  `github.com/PopKult/local-setup` (shared infra + one block per
+  service). Neither lives in the service's own repo, so cluster/local
+  topology changes don't require a code review there and vice versa.
 - **Graceful shutdown:** every service MUST use the drain-pattern
   lifecycle helper from `go-common` — on SIGTERM, stop accepting new
   work, let in-flight gRPC/Kafka/GraphQL requests finish within a fixed
@@ -458,10 +477,13 @@ query UI. No service holds an Elastic client or credential.
 - **Dockerfile:** multi-stage build — a build stage compiles the binary,
   the final image is `alpine`, running as a non-root user. Alpine (not
   distroless/scratch) so a shell is available for debugging in-cluster.
-- **Migrations:** `golang-migrate`, plain up/down SQL files in
-  `migrations/`, run as a k8s Job (or CI step) before the new version's
-  pods roll out. The app itself MUST NOT auto-run migrations on startup —
-  concurrent replicas would race.
+  Lives in the service repo (`deployments/docker/Dockerfile`) since
+  building the image is the service repo's job.
+- **Migrations:** `golang-migrate`, plain up/down SQL files in the
+  service repo's `migrations/`, run as a k8s Job defined in `prod-setup`
+  (or a CI step) before the new version's pods roll out. The app itself
+  MUST NOT auto-run migrations on startup — concurrent replicas would
+  race.
 - **Service-to-service auth:** a service mesh (Istio/Linkerd) provides
   transparent mutual TLS and identity between all services via sidecar
   proxies. Application code makes plain gRPC calls to another service's
@@ -493,7 +515,7 @@ mesh identity for service-to-service calls and the forwarded claims for
 
 ---
 
-## 9. Shared code & schema repo
+## 9. Shared code & infra repos
 
 - **`github.com/PopKult/go-common`:** logging setup, config loader,
   gRPC/Kafka/GraphQL middleware (RED metrics, tracing propagation,
@@ -502,9 +524,18 @@ mesh identity for service-to-service calls and the forwarded claims for
   dependency.
 - **`github.com/PopKult/schema`:** all `.proto` and GraphQL schema files,
   buf-managed, publishes generated Go stubs as a versioned module.
-- Both are private. Services (and CI) authenticate to pull them via
-  `GOPRIVATE=github.com/PopKult/*` plus token/SSH-based git auth — no
-  separate module proxy infrastructure.
+- **`github.com/PopKult/prod-setup`:** k8s manifests for every service —
+  plain manifests (no Helm, no Kustomize), one directory per service
+  (`services/<service>/`), tracked at `main`. See [§7](#7-deployment--runtime).
+- **`github.com/PopKult/local-setup`:** the local dev docker-compose
+  stack — shared infra (Postgres, Kafka, OTel Collector) plus one
+  build+run block per service, tracked at `main`. See
+  [§7](#7-deployment--runtime).
+- All four are private. `go-common`/`schema` are Go modules — services
+  (and CI) authenticate to `go get` them via `GOPRIVATE=github.com/PopKult/*`
+  plus token/SSH-based git auth, no separate module proxy infrastructure.
+  `prod-setup`/`local-setup` are plain git clones, not Go modules — no
+  `GOPRIVATE` needed, just normal git auth to clone a private repo.
 
 ---
 

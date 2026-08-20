@@ -1,5 +1,9 @@
 .PHONY: run run-relay build test test-integration lint vet generate-mocks migrate-up migrate-down docker-build compose-up compose-down
 
+# compose-up/compose-down assume github.com/PopKult/local-setup is
+# checked out as a sibling directory of this repo (see its README) —
+# the local dev docker-compose stack lives there, not here.
+
 run:
 	go run ./cmd/server
 
@@ -37,7 +41,7 @@ docker-build:
 	docker build -f deployments/docker/Dockerfile -t service-template:local .
 
 compose-up:
-	docker compose -f deployments/docker-compose.yml up --build
+	docker compose -f ../local-setup/docker-compose.yml up --build
 
 compose-down:
-	docker compose -f deployments/docker-compose.yml down -v
+	docker compose -f ../local-setup/docker-compose.yml down -v

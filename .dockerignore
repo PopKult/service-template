@@ -2,4 +2,3 @@
 .github
 bin/
 *.md
-deployments/k8s

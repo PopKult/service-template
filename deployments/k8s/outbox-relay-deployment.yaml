@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-template-outbox-relay
+  labels:
+    app: service-template-outbox-relay
+spec:
+  replicas: 2 # safe to run >1 replica: Relay.RelayOnce claims rows with FOR UPDATE SKIP LOCKED
+  selector:
+    matchLabels:
+      app: service-template-outbox-relay
+  template:
+    metadata:
+      labels:
+        app: service-template-outbox-relay
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: outbox-relay
+          image: ghcr.io/popkult/service-template:latest
+          command: ["/usr/local/bin/outbox-relay"]
+          ports:
+            - name: metrics
+              containerPort: 9091
+          envFrom:
+            - configMapRef:
+                name: service-template-config
+            - secretRef:
+                name: service-template-secrets
+          env:
+            - name: METRICS_PORT
+              value: "9091"
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 128Mi

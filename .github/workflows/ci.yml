@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  GOPRIVATE: github.com/PopKult/*
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: configure private module auth
+        run: git config --global url."https://x-access-token:${{ secrets.POPKULT_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: configure private module auth
+        run: git config --global url."https://x-access-token:${{ secrets.POPKULT_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - run: go build ./...
+      - run: go test ./...
+      # Integration tests spin up real Postgres via testcontainers-go —
+      # the GitHub-hosted runner has Docker available by default.
+      - run: go test -tags=integration ./...
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: configure private module auth
+        run: git config --global url."https://x-access-token:${{ secrets.POPKULT_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: trivy (Critical/High — blocks merge)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: trivy (Medium/Low — reported only, per §11.4)
+        if: always()
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: MEDIUM,LOW
+          exit-code: "0"
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: [lint, test, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: netrc for private module auth inside the build (Dockerfile's go-mod-download stage)
+        run: |
+          echo "machine github.com login x-access-token password ${{ secrets.POPKULT_MODULES_TOKEN }}" > /tmp/netrc
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployments/docker/Dockerfile
+          push: false
+          tags: service-template:ci
+          secret-files: netrc=/tmp/netrc

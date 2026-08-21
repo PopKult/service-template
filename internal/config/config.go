@@ -22,7 +22,8 @@ type Config struct {
 	GRPCPort    int `env:"GRPC_PORT" envDefault:"50051"`
 	MetricsPort int `env:"METRICS_PORT" envDefault:"9090"`
 
-	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"20s"`
+	ShutdownTimeout     time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"20s"`
+	HealthCheckInterval time.Duration `env:"HEALTH_CHECK_INTERVAL" envDefault:"10s"`
 
 	PostgresHost     string `env:"POSTGRES_HOST,required"`
 	PostgresPort     int    `env:"POSTGRES_PORT" envDefault:"5432"`

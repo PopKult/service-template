@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	commonconfig "github.com/PopKult/go-common/config"
 	"github.com/PopKult/go-common/logging"
@@ -41,6 +42,23 @@ func run() error {
 	errCh := make(chan error, 2)
 	go func() { errCh <- reg.GRPCServer.Start() }()
 	go func() { errCh <- reg.MetricsServer.Start() }()
+
+	// Periodically re-evaluate registered dependency checkers so the
+	// readiness probe (backed by the same health.Server) actually
+	// reflects current dependency health, not just the SERVING default
+	// from server start — see docs/microservice-standards.md §5.4.
+	go func() {
+		ticker := time.NewTicker(cfg.HealthCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reg.GRPCServer.Health().Refresh(ctx)
+			}
+		}
+	}()
 
 	logger.Info("service started",
 		slog.Int("grpc_port", cfg.GRPCPort),

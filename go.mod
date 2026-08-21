@@ -1,6 +1,6 @@
 module github.com/PopKult/service-template
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/PopKult/go-common v0.1.0

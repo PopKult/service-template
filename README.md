@@ -117,6 +117,11 @@ make lint
   authenticate `go mod download` for these private modules both in the
   Go toolchain steps and inside the Docker build (via a build secret —
   see `deployments/docker/Dockerfile` and `.github/workflows/ci.yml`).
+- `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — used only on a merge to
+  `main` (never on a PR build) to push the image to
+  `docker.io/popkult/service-template`, tagged `:latest` and
+  `:<short-sha>`. `DOCKERHUB_TOKEN` should be a Docker Hub access token
+  scoped to this repo, not the account password.
 
 ## Private module auth (local dev)
 

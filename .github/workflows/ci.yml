@@ -18,7 +18,7 @@ jobs:
           go-version-file: go.mod
       - name: configure private module auth
         run: git config --global url."https://x-access-token:${{ secrets.POPKULT_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -53,7 +53,7 @@ jobs:
           govulncheck ./...
 
       - name: trivy (Critical/High — blocks merge)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -62,7 +62,7 @@ jobs:
 
       - name: trivy (Medium/Low — reported only, per §11.4)
         if: always()
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -70,7 +70,7 @@ jobs:
           exit-code: "0"
 
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

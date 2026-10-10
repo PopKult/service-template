@@ -116,6 +116,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at = now() WHERE id = $1`, row.id); err != nil {
+			span.End()
 			return published, fmt.Errorf("outbox: mark row %d published: %w", row.id, err)
 		}
 		span.End()

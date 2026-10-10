@@ -24,5 +24,8 @@ USER app
 
 COPY --from=build /out/server /usr/local/bin/server
 COPY --from=build /out/outbox-relay /usr/local/bin/outbox-relay
+# Migrations travel with the image so the prod migrate Job can run exactly the
+# schema this release was built against (prod-setup copies them out of here).
+COPY --from=build /src/migrations /migrations
 
 ENTRYPOINT ["/usr/local/bin/server"]

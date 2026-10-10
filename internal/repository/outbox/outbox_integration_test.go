@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"testing"
 	"time"
 
@@ -18,7 +19,13 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/mock/gomock"
+
+	"github.com/PopKult/go-common/middleware/kafkamw"
 )
 
 func newTestPool(t *testing.T) *pgxpool.Pool {
@@ -53,26 +60,33 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	migration, err := os.ReadFile(migrationPath(t))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, path := range migrationPaths(t) {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", path, err)
+		}
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", path, err)
+		}
 	}
 
 	return pool
 }
 
-// migrationPath finds migrations/0001_create_outbox.up.sql relative to
-// this test file, independent of the working directory `go test` runs from.
-func migrationPath(t *testing.T) string {
+// migrationPaths returns every migrations/*.up.sql in order, found relative
+// to this test file, independent of the working directory `go test` runs from.
+func migrationPaths(t *testing.T) []string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("could not determine test file path")
 	}
-	return filepath.Join(thisFile, "..", "..", "..", "..", "migrations", "0001_create_outbox.up.sql")
+	paths, err := filepath.Glob(filepath.Join(thisFile, "..", "..", "..", "..", "migrations", "*.up.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("find migrations: %v (found %d)", err, len(paths))
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func TestWriteAndRelay_endToEnd(t *testing.T) {
@@ -174,5 +188,52 @@ func TestRelayOnce_publishFailure_leavesRowUnpublished(t *testing.T) {
 	}
 	if publishedAt != nil {
 		t.Errorf("published_at = %v, want NULL after a failed publish", publishedAt)
+	}
+}
+
+// A row written inside a traced request must be published as a
+// continuation of that trace, even though the relay runs in its own loop.
+func TestWriteAndRelay_propagatesTraceContext(t *testing.T) {
+	pool := newTestPool(t)
+
+	tp := sdktrace.NewTracerProvider()
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	reqCtx, reqSpan := tp.Tracer("test").Start(context.Background(), "request")
+	wantTraceID := reqSpan.SpanContext().TraceID()
+
+	tx, err := pool.Begin(reqCtx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := Write(reqCtx, tx, Event{
+		AggregateType: "widget", AggregateID: "widget-3", EventType: "widget.created", Payload: []byte("p"),
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := tx.Commit(reqCtx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	reqSpan.End()
+
+	ctrl := gomock.NewController(t)
+	mockProducer := NewMockProducer(ctrl)
+	mockProducer.EXPECT().
+		Produce(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, msg Message) error {
+			got := trace.SpanContextFromContext(kafkamw.Extract(context.Background(), kafkamw.HeaderCarrier(msg.Headers)))
+			if got.TraceID() != wantTraceID {
+				t.Errorf("published trace id = %s, want %s (header %q)", got.TraceID(), wantTraceID, msg.Headers["traceparent"])
+			}
+			return nil
+		}).
+		Times(1)
+
+	relay := NewRelay(pool, mockProducer, "widget.events", 10, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	// The relay's own loop context has no span; the trace must come from the row.
+	if _, err := relay.RelayOnce(context.Background()); err != nil {
+		t.Fatalf("RelayOnce: %v", err)
 	}
 }

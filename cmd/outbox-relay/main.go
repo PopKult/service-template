@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	commonconfig "github.com/PopKult/go-common/config"
 	"github.com/PopKult/go-common/logging"
 	"github.com/PopKult/go-common/shutdown"
+	"github.com/PopKult/go-common/telemetry"
 
 	"github.com/PopKult/service-template/internal/config"
 	"github.com/PopKult/service-template/internal/registry"
@@ -32,6 +34,23 @@ func run() error {
 
 	ctx, cancel := shutdown.NotifyContext()
 	defer cancel()
+
+	// Install the OTel SDK + W3C propagator; without it tracing middleware
+	// is a no-op. Flush pending spans last, after the servers drain.
+	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName: cfg.ServiceName + "-outbox-relay",
+		Endpoint:    cfg.OTelExporterEndpoint,
+		Insecure:    cfg.OTelInsecure,
+		SampleRatio: cfg.OTelSampleRatio,
+	})
+	if err != nil {
+		return fmt.Errorf("main: %w", err)
+	}
+	defer func() {
+		if err := shutdownTelemetry(context.Background()); err != nil {
+			logger.Error("flushing telemetry", slog.Any("error", err))
+		}
+	}()
 
 	reg, err := registry.NewRelay(ctx, cfg, logger)
 	if err != nil {

@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/PopKult/go-common/middleware/kafkamw"
 )
@@ -39,9 +42,10 @@ func NewRelay(pool *pgxpool.Pool, producer Producer, topic string, batchSize int
 }
 
 type outboxRow struct {
-	id      int64
-	key     string
-	payload []byte
+	id          int64
+	key         string
+	payload     []byte
+	traceparent string
 }
 
 // RelayOnce claims up to one batch of unpublished rows, publishes each to
@@ -56,7 +60,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, aggregate_id, payload
+		SELECT id, aggregate_id, payload, COALESCE(traceparent, '')
 		FROM outbox_events
 		WHERE published_at IS NULL
 		ORDER BY id
@@ -69,7 +73,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 	var batch []outboxRow
 	for rows.Next() {
 		var row outboxRow
-		if err := rows.Scan(&row.id, &row.key, &row.payload); err != nil {
+		if err := rows.Scan(&row.id, &row.key, &row.payload, &row.traceparent); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("outbox: scan row: %w", err)
 		}
@@ -82,8 +86,12 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 	published := 0
 	for _, row := range batch {
 		start := time.Now()
+		// Continue the trace of the request that wrote this row, so the
+		// consumer's span hangs off it instead of a disconnected root.
+		pubCtx, span := otel.Tracer("outbox-relay").Start(kafkamw.Restore(ctx, row.traceparent), "outbox publish "+r.topic,
+			trace.WithSpanKind(trace.SpanKindProducer))
 		headers := kafkamw.HeaderCarrier{}
-		kafkamw.Inject(ctx, headers)
+		kafkamw.Inject(pubCtx, headers)
 
 		pubErr := r.producer.Produce(ctx, Message{
 			Topic:   r.topic,
@@ -95,6 +103,9 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 			r.metrics.ObserveProduce(r.topic, pubErr, time.Since(start))
 		}
 		if pubErr != nil {
+			span.RecordError(pubErr)
+			span.SetStatus(codes.Error, "publish failed")
+			span.End()
 			// Commit what's already been marked published in this batch
 			// before returning — the rest stay unpublished (their locks
 			// release on commit) and get retried on the next tick.
@@ -107,6 +118,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at = now() WHERE id = $1`, row.id); err != nil {
 			return published, fmt.Errorf("outbox: mark row %d published: %w", row.id, err)
 		}
+		span.End()
 		published++
 	}
 

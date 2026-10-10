@@ -10,6 +10,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/PopKult/go-common/middleware/kafkamw"
 )
 
 // Event is one row to write to the outbox in the same transaction as the
@@ -25,11 +27,15 @@ type Event struct {
 // rolls back atomically with whatever other state change tx contains.
 // Call this from a repository method invoked by a use case inside that
 // use case's own transaction.
+//
+// The trace context active in ctx is stored with the row so the relay,
+// which runs in its own polling loop, can publish the message as a
+// continuation of the request that caused it (§5.2).
 func Write(ctx context.Context, tx pgx.Tx, ev Event) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
-		VALUES ($1, $2, $3, $4)`,
-		ev.AggregateType, ev.AggregateID, ev.EventType, ev.Payload,
+		INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload, traceparent)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''))`,
+		ev.AggregateType, ev.AggregateID, ev.EventType, ev.Payload, kafkamw.Capture(ctx),
 	)
 	if err != nil {
 		return fmt.Errorf("outbox: write event: %w", err)

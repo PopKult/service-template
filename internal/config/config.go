@@ -38,7 +38,9 @@ type Config struct {
 	OutboxRelayPollInterval time.Duration `env:"OUTBOX_RELAY_POLL_INTERVAL" envDefault:"2s"`
 	OutboxRelayBatchSize    int           `env:"OUTBOX_RELAY_BATCH_SIZE" envDefault:"100"`
 
-	OTelExporterEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT" envDefault:"otel-collector:4317"`
+	OTelExporterEndpoint string  `env:"OTEL_EXPORTER_OTLP_ENDPOINT" envDefault:"otel-collector:4317"`
+	OTelInsecure         bool    `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"true"`
+	OTelSampleRatio      float64 `env:"OTEL_TRACES_SAMPLER_RATIO" envDefault:"1"`
 }
 
 // SlogLevel maps LogLevel ("debug"|"info"|"warn"|"error", case

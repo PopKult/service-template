@@ -60,9 +60,9 @@ tags (see [§9](#9-shared-code--infra-repos)), `prod-setup` and
 | Unit test framework | stdlib `testing`, table-driven, no assertion library |
 | Mocking | `go.uber.org/mock` (`uber-go/mock`), generated via `go:generate` |
 | Integration tests | `testcontainers-go`, scoped to `internal/repository` + outbox relay only |
-| Tracing | OpenTelemetry SDK → OTel Collector |
+| Tracing | OpenTelemetry SDK → OTel Collector → Jaeger |
 | Metrics | Prometheus client, RED method, auto-instrumented via `go-common` middleware |
-| Log shipping | stdout → Filebeat/Fluent Bit DaemonSet → Elasticsearch |
+| Log shipping | stdout → Filebeat DaemonSet → Logstash → Elasticsearch → Kibana |
 | Config loading | `github.com/caarlos0/env/v9` into a typed `Config` struct, fail-fast at startup |
 | Secrets (prod) | k8s `Secret` sealed with Bitnami Sealed Secrets, committed encrypted |
 | Prod deploy target | Kubernetes, manifests in `github.com/PopKult/prod-setup` |
@@ -286,6 +286,10 @@ Rules:
   the OpenTelemetry trace context into message headers on publish, and
   `internal/entrypoint/kafkaconsumer` extracts it, so an async flow shows
   up as one continuous trace rather than disconnected fragments (§5.2).
+  The relay polls in its own loop, so it has no request context: the
+  outbox row stores the writing request's W3C `traceparent` in a nullable
+  `traceparent` column (`outbox.Write` calls `kafkamw.Capture`), and the
+  relay calls `kafkamw.Restore` per row before injecting the headers.
 
 ### 2.3 GraphQL
 
@@ -389,14 +393,31 @@ Three pillars, three tools, tied together by trace/span IDs:
 
 | Signal | Tool |
 |---|---|
-| Traces | OpenTelemetry SDK → OTel Collector → Elastic APM |
-| Metrics | Prometheus client → Prometheus → Grafana |
-| Logs | `log/slog` → stdout → Filebeat/Fluent Bit → Elasticsearch |
+| Traces | OpenTelemetry SDK → OTel Collector → Jaeger |
+| Metrics | Prometheus client → Prometheus → Grafana (alerts: Alertmanager → Telegram) |
+| Logs | `log/slog` → stdout → Filebeat → Logstash → Elasticsearch → Kibana |
 
 All telemetry export MUST go through an OTel Collector rather than each
 service talking to each backend directly: services export OTLP to the
-collector, which fans traces out to Elastic APM and exposes/pushes
-metrics to Prometheus. This keeps app-side instrumentation vendor-neutral.
+collector, which forwards traces to Jaeger. Metrics are the exception:
+Prometheus scrapes each service's `/metrics` port directly. This keeps
+app-side instrumentation vendor-neutral.
+
+Every binary (`cmd/server` and `cmd/outbox-relay`) MUST call
+`go-common/telemetry.Init` at startup and flush it on shutdown. Without
+it the global tracer provider and W3C propagator are no-ops: no spans are
+created and no trace context crosses a gRPC or Kafka hop, even though the
+middleware looks wired in.
+
+**What to log.** Log business decisions and failures, not plumbing: one
+`Info` line when a use case completes a state change that matters (with
+the IDs involved, never the payload), one `Warn` for a rejected or
+degraded-but-handled case, and `Error` exactly once where an error is
+finally handled (§3.1). Always use the `*Context` slog variants so
+`trace_id`/`span_id` attach. Never log tokens, passwords, emails,
+phone numbers or request/response bodies; `go-common/logging` and
+Logstash redact common keys as a safety net, but the first line of
+defence is not passing them (use `secure.String`).
 
 ### 5.1 Metrics
 
@@ -484,6 +505,22 @@ query UI. No service holds an Elastic client or credential.
   (or a CI step) before the new version's pods roll out. The app itself
   MUST NOT auto-run migrations on startup — concurrent replicas would
   race.
+- **Migrations MUST be backward compatible with the previous release.**
+  Rollouts are canaries (Argo Rollouts, 50% then 100%), so for a while
+  the old and the new version run against the same schema, and a rollback
+  reverts code but never the schema. Use expand → contract: add columns
+  nullable or with a default; rename or retype by adding the new column,
+  writing both, switching reads, and only then dropping the old one in a
+  later release; add `NOT NULL` only after backfilling. A migration that
+  drops or renames something the previous release still uses is a
+  defect. `down` files exist for local development, not as a prod
+  rollback mechanism.
+- **Rollout:** CI pushes the image to Docker Hub; a commit bumping the tag
+  in `prod-setup` is deployed by Argo CD as an Argo Rollouts canary (50%,
+  manual promote or metric analysis, then 100%).
+- **Backups:** PostgreSQL is backed up with pgBackRest (daily full + WAL
+  archiving, point-in-time recovery) to object storage outside the
+  database machines. A restore MUST be rehearsed, not assumed.
 - **Service-to-service auth:** a service mesh (Istio/Linkerd) provides
   transparent mutual TLS and identity between all services via sidecar
   proxies. Application code makes plain gRPC calls to another service's
